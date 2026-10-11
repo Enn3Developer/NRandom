@@ -1,0 +1,8 @@
+// The build script pins lwjgl3ify 3.0.10 for the Java 17+ dev runs, and its bootstrap is too old for the Angelica in
+// dependencies.gradle. Run on what GTNH 2.9.0-RC-2 ships instead. This file is applied after the build script sets
+// up those configurations, which dependencies.gradle is not.
+dependencies {
+    java17Dependencies("com.github.GTNewHorizons:lwjgl3ify:3.0.37")
+    java17PatchDependencies("com.github.GTNewHorizons:lwjgl3ify:3.0.37:forgePatches") { transitive = false }
+    java17Dependencies("com.github.GTNewHorizons:Hodgepodge:2.7.215")
+}

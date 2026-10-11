@@ -37,4 +37,6 @@ dependencies {
     // Spectre Glass is looked up by registry name at runtime, so Random Things (2.9.0-RC-2 version) is only
     // needed in the dev runs. It brings NEI along.
     runtimeOnlyNonPublishable("com.github.GTNewHorizons:Random-Things:2.7.11:dev")
+    // Angelica draws the connected textures from assets/nrandom/mcpatcher/ctm, so dev clients need it to show them.
+    runtimeOnlyNonPublishable("com.github.GTNewHorizons:Angelica:2.2.28:dev")
 }
