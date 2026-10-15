@@ -1,11 +1,7 @@
 package com.enn3developer.nrandom.spectreglass;
 
-import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Queue;
-import java.util.Set;
 
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.item.EntityItem;
@@ -29,9 +25,21 @@ import cpw.mods.fml.common.eventhandler.SubscribeEvent;
 public class SpectreGlassDropRescue {
 
     private static final int SEARCH_RADIUS = 4;
+    private static final int SEARCH_SIDE = 2 * SEARCH_RADIUS + 1;
+    private static final int SEARCH_VOLUME = SEARCH_SIDE * SEARCH_SIDE * SEARCH_SIDE;
+    private static final int NOT_FOUND = -1;
 
     private static final int[][] NEIGHBOURS = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 },
         { 0, 0, -1 } };
+
+    // Reused by every search so mob farms dropping into the glass don't allocate per drop. Safe because the handler
+    // only runs on the server thread.
+    private final int[] queue = new int[SEARCH_VOLUME];
+    /** A cell was visited by the current search if its entry equals {@link #searchId}, so nothing needs clearing. */
+    private final int[] visitedBy = new int[SEARCH_VOLUME];
+    private int searchId;
+    private final AxisAlignedBB candidateBox = AxisAlignedBB.getBoundingBox(0, 0, 0, 0, 0, 0);
+    private final List<AxisAlignedBB> colliding = new ArrayList<>();
 
     @SubscribeEvent
     public void onEntityJoinWorld(EntityJoinWorldEvent event) {
@@ -46,15 +54,24 @@ public class SpectreGlassDropRescue {
             return;
         }
 
-        int[] free = findNearestFreeBlock(event.world, entity);
-        if (free == null) {
-            free = findFreeBlockAbove(event.world, entity);
-        }
-        if (free == null) {
+        int startX = MathHelper.floor_double(entity.posX);
+        int startY = MathHelper.floor_double(entity.boundingBox.minY);
+        int startZ = MathHelper.floor_double(entity.posZ);
+
+        int cell = findNearestFreeCell(event.world, entity, startX, startY, startZ);
+        if (cell != NOT_FOUND) {
+            moveTo(entity, startX + cellX(cell), startY + cellY(cell), startZ + cellZ(cell));
             return;
         }
 
-        entity.setPosition(free[0] + 0.5, free[1] + entity.yOffset, free[2] + 0.5);
+        int freeY = findFreeYAbove(event.world, entity, startX, startY, startZ);
+        if (freeY != NOT_FOUND) {
+            moveTo(entity, startX, freeY, startZ);
+        }
+    }
+
+    private static void moveTo(Entity entity, int x, int y, int z) {
+        entity.setPosition(x + 0.5, y + entity.yOffset, z + 0.5);
         entity.motionX = 0;
         entity.motionY = 0;
         entity.motionZ = 0;
@@ -73,64 +90,72 @@ public class SpectreGlassDropRescue {
         return false;
     }
 
-    /** Breadth-first search, so the first free block found is the closest one by steps. */
-    private static int[] findNearestFreeBlock(World world, Entity entity) {
-        int startX = MathHelper.floor_double(entity.posX);
-        int startY = MathHelper.floor_double(entity.boundingBox.minY);
-        int startZ = MathHelper.floor_double(entity.posZ);
+    /**
+     * Breadth-first search, so the first free block found is the closest one by steps. Returns the cell index of that
+     * block in the search cube centred on the start, or {@link #NOT_FOUND}.
+     */
+    private int findNearestFreeCell(World world, Entity entity, int startX, int startY, int startZ) {
+        searchId++;
+        int head = 0;
+        int tail = 0;
+        int startCell = cell(0, 0, 0);
+        queue[tail++] = startCell;
+        visitedBy[startCell] = searchId;
 
-        Queue<int[]> queue = new ArrayDeque<>();
-        Set<Long> visited = new HashSet<>();
-        queue.add(new int[] { startX, startY, startZ });
-        visited.add(key(startX, startY, startZ));
-
-        while (!queue.isEmpty()) {
-            int[] pos = queue.poll();
-            if (fitsAt(world, entity, pos[0], pos[1], pos[2])) {
-                return pos;
+        while (head < tail) {
+            int current = queue[head++];
+            int dx = cellX(current);
+            int dy = cellY(current);
+            int dz = cellZ(current);
+            if (fitsAt(world, entity, startX + dx, startY + dy, startZ + dz)) {
+                return current;
             }
 
             for (int[] offset : NEIGHBOURS) {
-                int x = pos[0] + offset[0];
-                int y = pos[1] + offset[1];
-                int z = pos[2] + offset[2];
-                boolean outOfRange = Math.abs(x - startX) > SEARCH_RADIUS || Math.abs(y - startY) > SEARCH_RADIUS
-                    || Math.abs(z - startZ) > SEARCH_RADIUS;
-                if (outOfRange || y < 0 || y >= world.getHeight() || !visited.add(key(x, y, z))) {
+                int nx = dx + offset[0];
+                int ny = dy + offset[1];
+                int nz = dz + offset[2];
+                if (outsideSearch(nx) || outsideSearch(ny) || outsideSearch(nz)) {
                     continue;
                 }
-                queue.add(new int[] { x, y, z });
+                if (startY + ny < 0 || startY + ny >= world.getHeight()) {
+                    continue;
+                }
+                int next = cell(nx, ny, nz);
+                if (visitedBy[next] == searchId) {
+                    continue;
+                }
+                visitedBy[next] = searchId;
+                queue[tail++] = next;
             }
         }
-        return null;
+        return NOT_FOUND;
     }
 
     /** Fallback for drops buried deep in glass: the first free block straight above them. */
-    private static int[] findFreeBlockAbove(World world, Entity entity) {
-        int x = MathHelper.floor_double(entity.posX);
-        int z = MathHelper.floor_double(entity.posZ);
-        for (int y = MathHelper.floor_double(entity.boundingBox.minY); y < world.getHeight(); y++) {
+    private int findFreeYAbove(World world, Entity entity, int x, int startY, int z) {
+        for (int y = startY; y < world.getHeight(); y++) {
             if (fitsAt(world, entity, x, y, z)) {
-                return new int[] { x, y, z };
+                return y;
             }
         }
-        return null;
+        return NOT_FOUND;
     }
 
     /**
      * Whether the entity, centred on the bottom of this block, collides with nothing. Uses the same collision boxes
      * vanilla movement uses for this entity, so N Spectre Glass counts as solid.
      */
-    private static boolean fitsAt(World world, Entity entity, int x, int y, int z) {
+    private boolean fitsAt(World world, Entity entity, int x, int y, int z) {
         double halfWidth = entity.width / 2;
-        AxisAlignedBB box = AxisAlignedBB.getBoundingBox(
+        AxisAlignedBB box = candidateBox.setBounds(
             x + 0.5 - halfWidth,
             y,
             z + 0.5 - halfWidth,
             x + 0.5 + halfWidth,
             y + entity.height,
             z + 0.5 + halfWidth);
-        List<AxisAlignedBB> colliding = new ArrayList<>();
+        colliding.clear();
         for (int bx = MathHelper.floor_double(box.minX); bx <= MathHelper.floor_double(box.maxX); bx++) {
             for (int by = MathHelper.floor_double(box.minY); by <= MathHelper.floor_double(box.maxY); by++) {
                 for (int bz = MathHelper.floor_double(box.minZ); bz <= MathHelper.floor_double(box.maxZ); bz++) {
@@ -142,7 +167,24 @@ public class SpectreGlassDropRescue {
         return colliding.isEmpty();
     }
 
-    private static long key(int x, int y, int z) {
-        return ((long) x & 0x3FFFFFF) << 38 | ((long) y & 0xFFF) << 26 | (long) z & 0x3FFFFFF;
+    private static boolean outsideSearch(int offset) {
+        return Math.abs(offset) > SEARCH_RADIUS;
+    }
+
+    /** Packs an offset from the search start, each axis in [-SEARCH_RADIUS, SEARCH_RADIUS], into an array index. */
+    private static int cell(int dx, int dy, int dz) {
+        return ((dx + SEARCH_RADIUS) * SEARCH_SIDE + dy + SEARCH_RADIUS) * SEARCH_SIDE + dz + SEARCH_RADIUS;
+    }
+
+    private static int cellX(int cell) {
+        return cell / (SEARCH_SIDE * SEARCH_SIDE) - SEARCH_RADIUS;
+    }
+
+    private static int cellY(int cell) {
+        return cell / SEARCH_SIDE % SEARCH_SIDE - SEARCH_RADIUS;
+    }
+
+    private static int cellZ(int cell) {
+        return cell % SEARCH_SIDE - SEARCH_RADIUS;
     }
 }
