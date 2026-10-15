@@ -18,6 +18,7 @@ public final class NSpectreGlass {
     public static void preInit() {
         block = new BlockNSpectreGlass();
         GameRegistry.registerBlock(block, ItemBlockNSpectreGlass.class, BlockNSpectreGlass.NAME);
+        MinecraftForge.EVENT_BUS.register(new SpectreGlassDropRescue());
     }
 
     public static void init() {
